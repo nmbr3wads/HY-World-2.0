@@ -42,6 +42,9 @@ if __name__ == '__main__':
     parser.add_argument("--fsdp", action="store_true", help="Enable FSDP model sharding")
     parser.add_argument("--skip_exist", action="store_true", help="skip existing videos")
     parser.add_argument("--seed", default=1024, type=int, help="Random seed")
+    parser.add_argument("--block_swap", action="store_true",
+                        help="Swap transformer blocks CPU<->GPU per forward pass. Fits the 17B "
+                             "model in 32 GB VRAM without PCIe page-thrashing.")
 
     args = parser.parse_args()
 
@@ -93,6 +96,7 @@ if __name__ == '__main__':
         fsdp=args.fsdp,
         device_mesh=device_mesh,
         device=device,
+        block_swap=args.block_swap,
     )
     dist.barrier()
     generator = torch.Generator(device=device).manual_seed(args.seed)

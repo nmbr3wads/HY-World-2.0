@@ -492,7 +492,14 @@ class WorldStereoModel(_WorldStereoCommonMixin, WanTransformer3DModel):
                 timestep_proj = torch.chunk(timestep_proj, self.sp_size, dim=1)[parallel_dims.sp_rank]
 
         # 4. Transformer blocks
+        swap_blocks = getattr(self, 'block_swap_enabled', False)
+        _device = hidden_states.device
         for i, block in enumerate(self.blocks):
+            # Block swap: load block GPU -> sync -> compute -> sync -> offload CPU
+            if swap_blocks:
+                block.to(_device, non_blocking=True)
+                torch.cuda.current_stream().synchronize()
+
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = self._gradient_checkpointing_func(
                     block, hidden_states, encoder_hidden_states, timestep_proj, rotary_emb
@@ -503,6 +510,10 @@ class WorldStereoModel(_WorldStereoCommonMixin, WanTransformer3DModel):
             # adding control features
             if i < len(controlnet_states):
                 hidden_states += controlnet_states[i]
+
+            if swap_blocks:
+                torch.cuda.current_stream().synchronize()
+                block.to("cpu", non_blocking=True)
 
         output = self._apply_output_projection(
             hidden_states=hidden_states,
@@ -746,8 +757,15 @@ class WorldStereoRefSModel(_WorldStereoCommonMixin, WanTransformer3DModel):
                                   torch.chunk(ref_rotary_emb[1], self.sp_size, dim=1)[parallel_dims.sp_rank])
 
         # 4. Transformer blocks
+        swap_blocks = getattr(self, 'block_swap_enabled', False)
+        _device = hidden_states.device
         ref_states = reference_latent
         for i, block in enumerate(self.blocks):
+            # Block swap: load block GPU -> sync -> compute -> sync -> offload CPU
+            if swap_blocks:
+                block.to(_device, non_blocking=True)
+                torch.cuda.current_stream().synchronize()
+
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states, ref_states = self._gradient_checkpointing_func(
                     block, hidden_states,
@@ -761,6 +779,10 @@ class WorldStereoRefSModel(_WorldStereoCommonMixin, WanTransformer3DModel):
             # adding control features
             if i < len(controlnet_states):
                 hidden_states += controlnet_states[i]
+
+            if swap_blocks:
+                torch.cuda.current_stream().synchronize()
+                block.to("cpu", non_blocking=True)
 
         output = self._apply_output_projection(
             hidden_states=hidden_states,

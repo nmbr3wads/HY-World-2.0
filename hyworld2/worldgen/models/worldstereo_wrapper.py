@@ -127,6 +127,7 @@ class WorldStereo:
         fsdp: bool = False,
         device_mesh=None,
         device: torch.device | None = None,
+        block_swap: bool = False,
     ) -> "WorldStereo":
         """
         Build a WorldStereo instance from Hugging Face format
@@ -165,6 +166,7 @@ class WorldStereo:
             )
 
         cfg = OmegaConf.create(cls._load_hf_config(json_cfg_path))
+        cfg.block_swap = block_swap
         model_weights_path = safetensors_path
 
         model_type = subfolder
@@ -338,6 +340,20 @@ class WorldStereo:
             rank0_log("FSDP wrapping done for transformer.")
         else:
             transformer = transformer.to(device=device)
+
+        # Block swap: after the transformer is on GPU, move the main DiT blocks to CPU.
+        # Non-block components (embeddings, ControlNet, output proj) stay on GPU; each block
+        # is swapped GPU<->CPU one at a time during the forward pass (see worldstereo.py).
+        # Lets the 17B model run within 32 GB VRAM without PCIe page-thrashing.
+        if getattr(cfg, 'block_swap', False) and not fsdp:
+            n = len(transformer.blocks)
+            for block in transformer.blocks:
+                block.to("cpu")
+            transformer.block_swap_enabled = True
+            gc.collect()
+            torch.cuda.empty_cache()
+            rank0_log(f"Block swap ENABLED: all {n} DiT blocks off-loaded to CPU, "
+                      f"swapped per-forward. VRAM: {torch.cuda.memory_allocated()/1e9:.1f} GB")
 
         gc.collect()
         torch.cuda.empty_cache()

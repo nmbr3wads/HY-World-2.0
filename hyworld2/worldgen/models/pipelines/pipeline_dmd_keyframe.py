@@ -164,6 +164,12 @@ class RefKFDMDGeneratorPipeline(KeyframePipelineMixin, DiffusionPipeline, WanLor
             batch_size = prompt_embeds.shape[0]
 
         # 3. Encode input prompt 2-3% 0.3-0.4s
+        # The text/image encoders run ONCE here, then are idle for the entire denoise loop.
+        # Bring each onto the GPU just for its one-shot encode and offload it back to CPU
+        # afterwards (below), so neither sits resident through denoise. On a 32 GB card this
+        # reclaims ~12-17 GB (bf16 UMT5 + CLIP) — the dominant resident-weight cost. Robust to
+        # pipeline reuse: the .to(device) re-homes the encoder if a prior call offloaded it.
+        self.text_encoder.to(device)
         with torch.no_grad():
             prompt_embeds, negative_prompt_embeds = self.encode_prompt(
                 prompt=prompt,
@@ -183,10 +189,16 @@ class RefKFDMDGeneratorPipeline(KeyframePipelineMixin, DiffusionPipeline, WanLor
             negative_prompt_embeds = negative_prompt_embeds.to(transformer_dtype)
 
         if image_embeds is None:
+            self.image_encoder.to(device)
             with torch.no_grad():
                 image_embeds = self.encode_image(image, device)
         image_embeds = image_embeds.repeat(batch_size, 1, 1)
         image_embeds = image_embeds.to(transformer_dtype)
+
+        # Aux encoders are done (one-shot each) — evict them from VRAM for the denoise loop.
+        self.text_encoder.to("cpu")
+        self.image_encoder.to("cpu")
+        torch.cuda.empty_cache()
 
         # 4. Prepare timesteps 0%
         if mode == "train":  # random selection during training, return all steps during inference

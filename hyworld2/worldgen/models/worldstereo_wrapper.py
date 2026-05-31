@@ -365,19 +365,26 @@ class WorldStereo:
         from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 
         # ---- text encoder ----
-        rank0_log("Loading TextEncoder (UMT5)…")
+        # Load UMT5 in half precision (bf16 on Blackwell) instead of fp32: ~23 GB -> ~11.5 GB
+        # resident, near-lossless for conditioning (pipeline already casts embeds to the
+        # transformer dtype and runs under bf16 autocast). Do NOT torch.compile it: it runs
+        # once per generate and is offloaded to CPU during denoise, so compile is pure overhead
+        # (compile workers + WSL2 inductor fragility + a device-move recompile if reused).
+        enc_dtype = _get_half_dtype()
+        rank0_log(f"Loading TextEncoder (UMT5)… dtype={enc_dtype}")
         text_encoder = UMT5EncoderModel.from_pretrained(
-            cfg.base_model, subfolder="text_encoder", torch_dtype=torch.float32, local_files_only=local_files_only
+            cfg.base_model, subfolder="text_encoder", torch_dtype=enc_dtype, local_files_only=local_files_only
         ).eval()
         if _tr.__version__ >= "5.0.0":
             rank0_log("Patching text_encoder.encoder.embed_tokens for transformers>=5.0.0", "WARNING")
             text_encoder.encoder.embed_tokens = text_encoder.shared
-        text_encoder = torch.compile(text_encoder)
 
         # ---- image encoder ----
-        rank0_log("Loading ImageEncoder (CLIP)…")
+        # Same half-precision treatment as UMT5 above (fp32 -> bf16). Runs once per generate,
+        # offloaded during denoise.
+        rank0_log(f"Loading ImageEncoder (CLIP)… dtype={enc_dtype}")
         image_clip = CLIPVisionModel.from_pretrained(
-            cfg.base_model, subfolder="image_encoder", torch_dtype=torch.float32, local_files_only=local_files_only
+            cfg.base_model, subfolder="image_encoder", torch_dtype=enc_dtype, local_files_only=local_files_only
         ).eval()
         if _tr.__version__ >= "5.0.0":
             rank0_log("Patching CLIP vision forward for transformers>=5.0.0", "WARNING")

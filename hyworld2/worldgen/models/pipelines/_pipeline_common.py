@@ -134,7 +134,10 @@ class KeyframePipelineMixin:
         device: Optional[torch.device] = None,
     ):
         device = device or self._pipeline_execution_device()
-        image = self.image_processor(images=image, return_tensors="pt").to(device)
+        # Match the processor's float pixel_values to the image encoder's weight dtype.
+        # The encoder may be loaded in half precision (bf16), in which case fp32 pixel_values
+        # would raise a dtype mismatch in the first conv.
+        image = self.image_processor(images=image, return_tensors="pt").to(device, dtype=self.image_encoder.dtype)
         image_embeds = self.image_encoder(**image, output_hidden_states=True)
         return image_embeds.hidden_states[-2]
 

@@ -2,7 +2,9 @@ import collections
 import json
 import math
 import os
+import socket
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from glob import glob
 from typing import Tuple, List
@@ -1131,8 +1133,20 @@ class PanoramaMemoryBank:
         torch.cuda.empty_cache()
         if self.rank == 0:
             if not (skip_exist and os.path.exists(f"{self.world_mirror_dir}/name_map.json")):
+                # Launch the WorldMirror torchrun child robustly, independent of the ambient
+                # environment (fixes two infra failures when run from the full pipeline):
+                #  - Use THIS process's interpreter (sys.executable + torch.distributed.run) rather
+                #    than a bare "torchrun" off PATH, which can resolve to a different venv lacking
+                #    flash_attn -> "ModuleNotFoundError: flash_attn" and the run dies here.
+                #  - Pick a free rendezvous port (and strip inherited MASTER_ADDR/PORT) so the child
+                #    can't collide with the parent's process group -> EADDRINUSE on the default 29500.
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _wm_sock:
+                    _wm_sock.bind(("127.0.0.1", 0))
+                    _wm_port = _wm_sock.getsockname()[1]
                 wm_cmd = [
-                    "torchrun", f"--nproc_per_node={self.world_size}", "-m", "worldrecon.pipeline",
+                    sys.executable, "-m", "torch.distributed.run",
+                    f"--nproc_per_node={self.world_size}", f"--master_port={_wm_port}",
+                    "-m", "worldrecon.pipeline",
                     "--input_path", f"{self.world_mirror_dir}/images",
                     "--prior_cam_path", f"{self.world_mirror_dir}/cameras.json",
                     "--strict_output_path", f"{self.world_mirror_dir}/results",
@@ -1149,7 +1163,8 @@ class PanoramaMemoryBank:
                     "--disable_heads", "normal", "points", "gs"
                 ]
                 color_print(f"[Rank0] Running World Mirror inference: {' '.join(wm_cmd)}", "info")
-                result = subprocess.run(wm_cmd, cwd="..")
+                wm_env = {k: v for k, v in os.environ.items() if k not in ("MASTER_ADDR", "MASTER_PORT")}
+                result = subprocess.run(wm_cmd, cwd="..", env=wm_env)
 
                 if result.returncode != 0:
                     raise RuntimeError(f"World Mirror inference failed with return code {result.returncode}")

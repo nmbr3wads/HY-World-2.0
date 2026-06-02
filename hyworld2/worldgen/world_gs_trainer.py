@@ -1710,7 +1710,12 @@ class Runner:
                                 o3d.io.write_triangle_mesh(
                                     f"{self.ply_dir}/fuse_simplified.ply", mesh_simplified)
 
-                    dist.barrier()
+                    # `dist` is only imported (above) under world_size > 1; guard the
+                    # barrier so single-GPU runs don't hit UnboundLocalError after the
+                    # splat/mesh are already written.
+                    if self.world_size > 1:
+                        import torch.distributed as dist
+                        dist.barrier()
 
             # Turn Gradients into Sparse Tensor before running optimizer
             if cfg.sparse_grad:

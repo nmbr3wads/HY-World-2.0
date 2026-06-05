@@ -204,7 +204,15 @@ if __name__ == '__main__':
                     with timer.track("[IO] Save Results"):
                         # [f,c,h,w]->[f,h,w,c]
                         output = output.permute(0, 2, 3, 1).cpu().numpy()
-                        export_to_video(output, f"{scene}/render_results/{view_id}/{traj_id}/{args.model_type}_result.mp4", fps=16)
+                        # Write atomically: --skip_exist trusts this file's mere
+                        # existence to resume, so a crash (or a Modal volume.commit())
+                        # mid-write must never leave a partial mp4 that a re-run skips.
+                        # Write to a sibling .tmp.mp4 then os.replace (atomic on the
+                        # same filesystem).
+                        result_path = f"{scene}/render_results/{view_id}/{traj_id}/{args.model_type}_result.mp4"
+                        tmp_path = f"{result_path}.tmp.mp4"
+                        export_to_video(output, tmp_path, fps=16)
+                        os.replace(tmp_path, result_path)
                 dist.barrier()
 
                 # update memory bank

@@ -8,11 +8,25 @@ import torch.nn.functional as F
 import torch
 
 try:
-    from flash_attn_interface import flash_attn_func as flash_attn_func_v3
+    from flash_attn_interface import flash_attn_func as flash_attn_func_v3  # FA3 (Hopper)
     _USE_FLASH_ATTN_V3 = True
+    _HAS_FLASH_ATTN = True
 except ImportError:
-    from flash_attn.flash_attn_interface import flash_attn_func as flash_attn_func_v2
-    _USE_FLASH_ATTN_V3 = False
+    try:
+        from flash_attn.flash_attn_interface import flash_attn_func as flash_attn_func_v2  # FA2
+        _USE_FLASH_ATTN_V3 = False
+        _HAS_FLASH_ATTN = True
+    except ImportError:
+        # Neither FA3 nor FA2 is installed (e.g. a cloud image that skipped the long
+        # flash-attn build). Don't let a missing optional dep be fatal — fall back to
+        # PyTorch's F.scaled_dot_product_attention, which has its own fused/flash
+        # kernels. Degrade, don't crash. (A missing FA2 here, surfaced only when this
+        # module was finally imported 10.7h into a paid Stage-3 run, cost ~$60 on
+        # 2026-06-04.)
+        flash_attn_func_v2 = None
+        flash_attn_func_v3 = None
+        _USE_FLASH_ATTN_V3 = False
+        _HAS_FLASH_ATTN = False
 from ...comm.padding import minimal_pad_to_divisible, depad_by_length, pad_by_length
 import torch.distributed as dist
 from ...comm.communication import _All2All, _Allgather
@@ -55,7 +69,9 @@ class Attention(nn.Module):
         return q, k, v, B, N, C
 
     def _apply_attention(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-        if q.dtype==torch.bfloat16 or q.dtype==torch.float16:
+        # flash-attn only supports half precision; use it when available, otherwise
+        # fall back to SDPA (which also handles the fp32 path below).
+        if _HAS_FLASH_ATTN and (q.dtype==torch.bfloat16 or q.dtype==torch.float16):
             if q.is_contiguous():
                 q = q.transpose(1,2)
             else:
